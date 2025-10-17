@@ -103,6 +103,31 @@ async def get_token_info(region: str) -> Tuple[str, str, str]:
     return info['token'], info['region'], info['server_url']
 
 @app.route('/get')
+async def get_account_info():
+    uid = request.args.get('uid')
+    region = request.args.get('region', 'ME').upper()
+    if region not in SUPPORTED_REGIONS:
+        region = "ME"
+    if not uid:
+        return jsonify({"error": "Please provide UID."}), 400
+    
+    try:
+        return_data = await GetAccountInformation(uid, "7", region)
+        formatted = format_response(return_data)
+        return jsonify(formatted), 200
+    
+    except Exception as e:
+        return jsonify({"error": "Invalid UID or server error. Please try again."}), 500
+
+@app.route('/refresh', methods=['GET', 'POST'])
+def refresh_tokens_endpoint():
+    try:
+        asyncio.run(initialize_tokens())
+        return jsonify({'message': 'Tokens refreshed for ME and IND regions.'}), 200
+    except Exception as e:
+        return jsonify({'error': f'Refresh failed: {e}'}), 500
+
+# === Functions ===
 async def GetAccountInformation(uid, unk, region):
     payload = await json_to_proto(json.dumps({'a': uid, 'b': unk}), main_pb2.GetPlayerPersonalShow())
     data_enc = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, payload)
@@ -129,45 +154,17 @@ async def GetAccountInformation(uid, unk, region):
     async with httpx.AsyncClient() as client:
         resp = await client.post(server + "/GetPlayerPersonalShow", data=data_enc, headers=headers)
         raw = resp.content
+
         try:
+            # المحاولة الأولى لفك البروتوباف (الطبيعية)
             return json.loads(json_format.MessageToJson(decode_protobuf(raw, AccountPersonalShow_pb2.AccountPersonalShowInfo)))
         except Exception:
-            # السيرفر الهندي قد يرسل بايتات مختلفة ببداية الاستجابة
+            # المحاولة الثانية (مع حذف أول 8 بايت)
             try:
-                raw = raw[8:]  # حذف الهيدر الإضافي المحتمل
+                raw = raw[8:]
                 return json.loads(json_format.MessageToJson(decode_protobuf(raw, AccountPersonalShow_pb2.AccountPersonalShowInfo)))
             except Exception:
                 raise Exception("DecodeError")
-
-@app.route('/refresh', methods=['GET', 'POST'])
-def refresh_tokens_endpoint():
-    try:
-        asyncio.run(initialize_tokens())
-        return jsonify({'message': 'Tokens refreshed for ME and IND regions.'}), 200
-    except Exception as e:
-        return jsonify({'error': f'Refresh failed: {e}'}), 500
-
-# === Functions ===
-async def GetAccountInformation(uid, unk, region):
-    payload = await json_to_proto(json.dumps({'a': uid, 'b': unk}), main_pb2.GetPlayerPersonalShow())
-    data_enc = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, payload)
-    token, lock, _ = await get_token_info(region)
-
-    # اختيار السيرفر حسب region
-    if region == "IND":
-        server = "https://client.ind.freefiremobile.com"
-    else:
-        server = "https://clientbp.ggblueshark.com"
-
-    headers = {
-        'User-Agent': USERAGENT, 'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
-        'Content-Type': "application/octet-stream", 'Expect': "100-continue",
-        'Authorization': token, 'X-Unity-Version': "2018.4.11f1", 'X-GA': "v1 1",
-        'ReleaseVersion': RELEASEVERSION
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(server + "/GetPlayerPersonalShow", data=data_enc, headers=headers)
-        return json.loads(json_format.MessageToJson(decode_protobuf(resp.content, AccountPersonalShow_pb2.AccountPersonalShowInfo)))
 
 def format_response(data):
     return {
