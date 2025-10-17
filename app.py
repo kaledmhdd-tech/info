@@ -19,7 +19,7 @@ MAIN_KEY = base64.b64decode('WWcmdGMlREV1aDYlWmNeOA==')
 MAIN_IV = base64.b64decode('Nm95WkRyMjJFM3ljaGpNJQ==')
 RELEASEVERSION = "OB50"
 USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 13; CPH2095 Build/RKQ1.211119.001)"
-SUPPORTED_REGIONS = {"IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EU"}
+SUPPORTED_REGIONS = {"IND", "ME"}  # فقط ME و IND
 
 # === Flask App Setup ===
 app = Flask(__name__)
@@ -46,7 +46,10 @@ async def json_to_proto(json_data: str, proto_message: Message) -> bytes:
     return proto_message.SerializeToString()
 
 def get_account_credentials(region: str) -> str:
-    # دائمًا region = ME
+    # حساب خاص بـ ME فقط
+    if region == "ME":
+        return "uid=3831627617&password=CAC2F2F3E2F28C5F5944D502CD171A8AAF84361CDC483E94955D6981F1CFF3E3"
+    # يمكنك إضافة حساب خاص بـ IND لاحقًا إن لزم
     return "uid=3831627617&password=CAC2F2F3E2F28C5F5944D502CD171A8AAF84361CDC483E94955D6981F1CFF3E3"
 
 # === Token Generation ===
@@ -60,8 +63,7 @@ async def get_access_token(account: str):
         return data.get("access_token", "0"), data.get("open_id", "0")
 
 async def create_jwt(region: str):
-    # region param ignored, دائمًا "ME"
-    account = get_account_credentials("ME")
+    account = get_account_credentials(region)
     token_val, open_id = await get_access_token(account)
     body = json.dumps({"open_id": open_id, "open_id_type": "4", "login_token": token_val, "orign_platform_type": "4"})
     proto_bytes = await json_to_proto(body, FreeFire_pb2.LoginReq())
@@ -75,7 +77,7 @@ async def create_jwt(region: str):
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, data=payload, headers=headers)
         msg = json.loads(json_format.MessageToJson(decode_protobuf(resp.content, FreeFire_pb2.LoginRes)))
-        cached_tokens["ME"] = {
+        cached_tokens[region] = {
             'token': f"Bearer {msg.get('token','0')}",
             'region': msg.get('lockRegion','0'),
             'server_url': msg.get('serverUrl','0'),
@@ -83,7 +85,6 @@ async def create_jwt(region: str):
         }
 
 async def initialize_tokens():
-    # فقط ME
     await create_jwt("ME")
 
 async def refresh_tokens_periodically():
@@ -92,29 +93,34 @@ async def refresh_tokens_periodically():
         await initialize_tokens()
 
 async def get_token_info(region: str) -> Tuple[str, str, str]:
-    # region param ignored, دائما ME
-    info = cached_tokens.get("ME")
+    # IND لا يحتاج JWT — فقط سيرفر مباشر
+    if region == "IND":
+        return "Bearer NONE", "IND", "https://client.ind.freefiremobile.com"
+    
+    info = cached_tokens.get(region)
     if info and time.time() < info['expires_at']:
         return info['token'], info['region'], info['server_url']
-    await create_jwt("ME")
-    info = cached_tokens["ME"]
+    await create_jwt(region)
+    info = cached_tokens[region]
     return info['token'], info['region'], info['server_url']
 
 @app.route('/get')
 async def get_account_info():
     uid = request.args.get('uid')
+    region = request.args.get('region', 'ME').upper()
+
     if not uid:
         return jsonify({"error": "Please provide UID."}), 400
+
+    if region not in SUPPORTED_REGIONS:
+        return jsonify({"error": "Unsupported region. Use ME or IND only."}), 400
     
     try:
-        region = "ME"  # دائمًا ME، تجاهل أي استدعاء أو API خارجي
-
-        return_data = await GetAccountInformation(uid, "7", region, "/GetPlayerPersonalShow")
-        formatted = format_response(return_data)
+        data = await GetAccountInformation(uid, "7", region, "/GetPlayerPersonalShow")
+        formatted = format_response(data)
         return jsonify(formatted), 200
-    
     except Exception as e:
-        return jsonify({"error": "Invalid UID or server error. Please try again."}), 500
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 @app.route('/refresh', methods=['GET', 'POST'])
 def refresh_tokens_endpoint():
