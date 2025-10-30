@@ -50,7 +50,7 @@ def get_account_credentials(region: str) -> str:
     if region == "IND":
         return "uid=3821627607&password=7D24D48A3C67AE5C5F20B37EFCB29F6E6E30DDBB3FA9C2E0D3032A3A4C567F1A"
     else:
-        return "uid=3831627617&password=CAC2F2F3E2F28C5F5944D502CD171A8AAF84361CDC483E94955D6981F1CFF3E3"
+        return "uid=4182943559&password=C4_RIZAKYI_BNGX_VIP_TMBYYXWA"
 
 # === Token Generation ===
 async def get_access_token(account: str):
