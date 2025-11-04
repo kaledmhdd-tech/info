@@ -1,0 +1,222 @@
+import AccountPersonalShow_pb2
+import main_pb2
+import FreeFire_pb2
+import httpx
+import asyncio
+import json
+from google.protobuf import json_format, message
+from google.protobuf.message import Message
+from Crypto.Cipher import AES
+import base64
+from typing import Tuple
+import binascii
+import time
+from cachetools import TTLCache
+
+MAIN_KEY = base64.b64decode('WWcmdGMlREV1aDYlWmNeOA==')
+MAIN_IV = base64.b64decode('Nm95WkRyMjJFM3ljaGpNJQ==')
+RELEASEVERSION = "OB51"
+USERAGENT = "Free%20Fire/2019118692 CFNetwork/3826.500.111.2.2 Darwin/24.4.0"
+SUPPORTED_REGIONS = ["IND", "BR", "SG", "RU", "ID", "TW", "US", "VN", "TH", "ME", "PK", "CIS"]
+
+# حساب API الجديد
+JWT_API_URL = "https://api-jwt-ag-team.vercel.app/get"
+
+# Cache للـ JWT tokens (يدوم 4 ساعات)
+jwt_cache = TTLCache(maxsize=10, ttl=4 * 60 * 60)  # 4 ساعات
+last_request_time = 0
+REQUEST_DELAY = 2  # تأخير 2 ثانية بين الطلبات
+
+async def get_jwt_from_api(uid, password):
+    """جلب JWT من API الجديد مع إدارة rate limiting"""
+    global last_request_time
+    
+    # تأخير بين الطلبات لتجنب rate limiting
+    current_time = time.time()
+    time_since_last_request = current_time - last_request_time
+    if time_since_last_request < REQUEST_DELAY:
+        await asyncio.sleep(REQUEST_DELAY - time_since_last_request)
+    
+    url = f"{JWT_API_URL}?uid={uid}&password={password}"
+    print(f"🔐 جلب JWT من API: {url}")
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url)
+        last_request_time = time.time()
+        print(f"📊 حالة استجابة JWT API: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"📦 بيانات الاستجابة: {data}")
+            
+            if data.get("status") == "success" and data.get("token"):
+                return data["token"]
+            elif data.get("status") == "error":
+                error_msg = data.get("message", "Unknown error")
+                if "too_many_requests" in error_msg:
+                    raise Exception("Rate limit exceeded - please wait before making another request")
+                else:
+                    raise Exception(f"JWT API error: {error_msg}")
+            else:
+                raise Exception(f"Unexpected API response: {data}")
+        else:
+            raise Exception(f"JWT API returned status {response.status_code}")
+
+async def create_jwt(region: str) -> Tuple[str, str, str]:
+    try:
+        print(f"🔐 محاولة إنشاء JWT للمنطقة: {region}")
+        
+        # التحقق من الـ cache أولاً
+        cache_key = f"jwt_{region}"
+        if cache_key in jwt_cache:
+            print(f"✅ استخدام JWT من الـ cache للمنطقة: {region}")
+            token = jwt_cache[cache_key]
+        else:
+            # تعريف UID و Password لكل منطقة
+            region_credentials = {
+                'IND': ("3128851125", "A2E0175866917124D431D93C8F0179502108F92B9E22B84F855730F2E70ABEA4"),
+                'SG': ("3158350464", "70EA041FCF79190E3D0A8F3CA95CAAE1F39782696CE9D85C2CCD525E28D223FC"),
+                'RU': ("3301239795", "DD40EE772FCBD61409BB15033E3DE1B1C54EDA83B75DF0CDD24C34C7C8798475"),
+                'ID': ("3301269321", "D11732AC9BBED0DED65D0FED7728CA8DFF408E174202ECF1939E328EA3E94356"),
+                'TW': ("3301329477", "359FB179CD92C9C1A2A917293666B96972EF8A5FC43B5D9D61A2434DD3D7D0BC"),
+                'US': ("3301387397", "BAC03CCF677F8772473A09870B6228ADFBC1F503BF59C8D05746DE451AD67128"),
+                'VN': ("3301447047", "044714F5B9284F3661FB09E4E9833327488B45255EC9E0CCD953050E3DEF1F54"),
+                'TH': ("3301470613", "39EFD9979BD6E9CCF6CBFF09F224C4B663E88B7093657CB3D4A6F3615DDE057A"),
+                'ME': ("4210165885", "AlliFF_VIP-FGWA5U9Z4-AGTEAM"),
+                'PK': ("3301828218", "3A0E972E57E9EDC39DC4830E3D486DBFB5DA7C52A4E8B0B8F3F9DC4450899571"),
+                'CIS': ("3309128798", "412F68B618A8FAEDCCE289121AC4695C0046D2E45DB07EE512B4B3516DDA8B0F"),
+                'BR': ("3158668455", "44296D19343151B25DE68286BDC565904A0DA5A5CC5E96B7A7ADBE7C11E07933")
+            }
+            
+            if region not in region_credentials:
+                raise Exception(f"Region {region} not supported")
+            
+            uid, password = region_credentials[region]
+            
+            # استخدام API الجديد لجلب JWT
+            token = await get_jwt_from_api(uid, password)
+            
+            if not token:
+                raise Exception("Failed to get token from JWT API")
+            
+            # تخزين الـ token في الـ cache
+            jwt_cache[cache_key] = token
+            print(f"✅ تم تخزين JWT في الـ cache للمنطقة: {region}")
+        
+        print(f"✅ تم الحصول على JWT بنجاح: {token[:50]}...")
+        
+        # استخدام قيم افتراضية للمنطقة وسيرفر URL
+        region_server = "EUROPE"
+        server_url = "https://clientbp.ggblueshark.com"
+        
+        print(f"🌍 المنطقة الافتراضية: {region_server}")
+        print(f"🔗 رابط السيرفر الافتراضي: {server_url}")
+        
+        return f"Bearer {token}", region_server, server_url
+            
+    except Exception as e:
+        print(f"❌ خطأ في create_jwt: {str(e)}")
+        # إزالة الـ token من الـ cache إذا كان فيه خطأ
+        cache_key = f"jwt_{region}"
+        if cache_key in jwt_cache:
+            del jwt_cache[cache_key]
+        raise e
+
+async def json_to_proto(json_data: str, proto_message: Message) -> bytes:
+    json_format.ParseDict(json.loads(json_data), proto_message)
+    serialized_data = proto_message.SerializeToString()
+    return serialized_data
+
+def pad(text: bytes) -> bytes:
+    padding_length = AES.block_size - (len(text) % AES.block_size)
+    padding = bytes([padding_length] * padding_length)
+    return text + padding
+
+def aes_cbc_encrypt(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
+    aes = AES.new(key, AES.MODE_CBC, iv)
+    padded_plaintext = pad(plaintext)
+    ciphertext = aes.encrypt(padded_plaintext)
+    return ciphertext
+
+# دالة محسنة لتحويل البيانات من hex إلى protobuf
+def decode_hex_protobuf(hex_data):
+    """تحويل البيانات من hex إلى كائن protobuf"""
+    try:
+        # تحويل hex إلى bytes
+        byte_data = binascii.unhexlify(hex_data.replace(' ', ''))
+        
+        # إنشاء كائن protobuf وتحليل البيانات
+        users = AccountPersonalShow_pb2.AccountPersonalShowInfo()
+        users.ParseFromString(byte_data)
+        
+        return users
+    except Exception as e:
+        print(f"❌ خطأ في تحويل protobuf: {e}")
+        raise e
+
+async def GetAccountInformation(ID, UNKNOWN_ID, regionMain, endpoint):
+    try:
+        print(f"👤 جلب معلومات الحساب: ID={ID}, Region={regionMain}")
+        
+        json_data = json.dumps({
+            "a": ID,
+            "b": UNKNOWN_ID
+        })
+        
+        encoded_result = await json_to_proto(json_data, main_pb2.GetPlayerPersonalShow())
+        payload = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, encoded_result)
+        
+        regionMain = regionMain.upper()
+        if regionMain not in SUPPORTED_REGIONS:
+            return {
+                "error": "Invalid request",
+                "message": f"Unsupported 'region' parameter. Supported regions are: {', '.join(SUPPORTED_REGIONS)}."
+            }
+        
+        token, region, serverUrl = await create_jwt(regionMain)
+        print(f"🔑 Token: {token[:50]}...")
+        print(f"🌍 Server URL: {serverUrl}")
+        
+        headers = {
+            "Host": "clientbp.ggblueshark.com",
+            "X-Unity-Version": "2018.4.11f1",
+            "Accept": "*/*",
+            "Authorization": token,
+            "ReleaseVersion": RELEASEVERSION,
+            "X-GA": "v1 1",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+            "Content-Type": "application/octet-stream",
+            "User-Agent": USERAGENT,
+            "Connection": "keep-alive"
+        }
+        
+        full_url = serverUrl + endpoint
+        print(f"🌐 إرسال طلب إلى: {full_url}")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(full_url, data=payload, headers=headers)
+            print(f"📊 حالة الاستجابة النهائية: {response.status_code}")
+            
+            if response.status_code != 200:
+                raise Exception(f"Server returned status {response.status_code}")
+            
+            response_content = response.content
+            
+            # تحويل الرد إلى hex أولاً ثم تحليله
+            hex_response = response_content.hex()
+            print(f"📦 حجم البيانات المستلمة: {len(hex_response)} حرف hex")
+            
+            # استخدام الدالة المحسنة لتحويل protobuf
+            message_obj = decode_hex_protobuf(hex_response)
+            
+            # تحويل الكائن protobuf إلى JSON
+            message_json = json_format.MessageToJson(message_obj)
+            message_data = json.loads(message_json)
+            
+            print(f"✅ تم جلب معلومات الحساب بنجاح")
+            return message_data
+            
+    except Exception as e:
+        print(f"❌ خطأ في GetAccountInformation: {str(e)}")
+        raise e
