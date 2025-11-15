@@ -1,139 +1,145 @@
-from functools import wraps
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from cachetools import TTLCache
-import lib2
-import json
-import asyncio
-import traceback
-import re
-
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+import binascii
+import requests
+from flask import Flask, jsonify, request
+from data_pb2 import AccountPersonalShowInfo
+from google.protobuf.json_format import MessageToDict
+import uid_generator_pb2
+import threading
+import time
 app = Flask(__name__)
-CORS(app)
-
-# Create a cache with a TTL (time-to-live) of 300 seconds (5 minutes)
-cache = TTLCache(maxsize=100, ttl=300)
-
-def cached_endpoint(ttl=300):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            cache_key = (request.path, tuple(request.args.items()))
-            if cache_key in cache:
-                return cache[cache_key]
+jwt_token = None
+jwt_lock = threading.Lock()
+def extract_token_from_response(data, region):
+    if region == "IND":
+        if data.get('status') in ['success', 'live']:
+            return data.get('token')
+    elif region in ["BR", "US", "SAC", "NA"]:
+        if isinstance(data, dict) and 'token' in data:
+            return data['token']
+    else: 
+        if data.get('status') == 'success':
+            return data.get('token')
+    return None
+def get_jwt_token_sync(region):
+    global jwt_token
+    endpoints = {
+        "IND": "https://jwtgenchx.vercel.app/token?uid=3976277520&password=3C07CA0CF3C22DB4DB5A00A8C75E3FED7869FB11CED0ADFB5C8DE7E92652B704",
+        "BR": "https://projects-fox-x-get-jwt.vercel.app/get?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39lH3x2kJkO",
+        "US": "https://tokenalljwt.onrender.com/api/oauth_guest?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39lH3x2kJkO",
+        "SAC": "https://tokenalljwt.onrender.com/api/oauth_guest?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39lH3x2kJkO",
+        "NA": "https://tokenalljwt.onrender.com/api/oauth_guest?uid=3787481313&password=JlOivPeosauV0l9SG6gwK39lH3x2kJkO",
+        "default": "https://projects-fox-x-get-jwt.vercel.app/get?uid=3763606630&password=7FF33285F290DDB97D9A31010DCAA10C2021A03F27C4188A2F6ABA418426527C"
+    }    
+    url = endpoints.get(region, endpoints["default"])
+    with jwt_lock:
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                token = extract_token_from_response(data, region)
+                if token:
+                    jwt_token = token
+                    print(f"JWT Token for {region} updated successfully: {token[:50]}...")
+                    return jwt_token
+                else:
+                    print(f"Failed to extract token from response for {region}")
             else:
-                result = func(*args, **kwargs)
-                cache[cache_key] = result
-                return result
-        return wrapper
-    return decorator
-
-@app.route('/info=<uid>')
-@cached_endpoint()
-def get_account_info(uid):
-    """
-    جديد: يدعم الرابط http://217.154.239.23:13984/info=2346459713
-    النظام رح يبحث أولاً في ME وبعدين في باقي السيرفرات
-    """
-    
-    if not uid or not uid.isdigit():
-        response = {
-            "error": "Invalid request",
-            "message": "Invalid 'uid' parameter. Please provide a valid numeric UID."
-        }
-        return jsonify(response), 400, {'Content-Type': 'application/json; charset=utf-8'}
-
+                print(f"Failed to get JWT token for {region}: HTTP {response.status_code}")
+        except Exception as e:
+            print(f"Request error for {region}: {e}")   
+    return None
+def ensure_jwt_token_sync(region):
+    global jwt_token
+    if not jwt_token:
+        print(f"JWT token for {region} is missing. Attempting to fetch a new one...")
+        return get_jwt_token_sync(region)
+    return jwt_token
+def jwt_token_updater(region):
+    while True:
+        get_jwt_token_sync(region)
+        time.sleep(300)
+def get_api_endpoint(region):
+    endpoints = {
+        "IND": "https://client.ind.freefiremobile.com/GetPlayerPersonalShow",
+        "BR": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "US": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "SAC": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "NA": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+        "default": "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+    }
+    return endpoints.get(region, endpoints["default"])
+key = "Yg&tc%DEuh6%Zc^8"
+iv = "6oyZDr22E3ychjM%"
+def encrypt_aes(hex_data, key, iv):
+    key = key.encode()[:16]
+    iv = iv.encode()[:16]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_data = pad(bytes.fromhex(hex_data), AES.block_size)
+    encrypted_data = cipher.encrypt(padded_data)
+    return binascii.hexlify(encrypted_data).decode()
+def apis(idd, region):
+    global jwt_token    
+    token = ensure_jwt_token_sync(region)
+    if not token:
+        raise Exception(f"Failed to get JWT token for region {region}")    
+    endpoint = get_api_endpoint(region)    
+    headers = {
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+        'Connection': 'Keep-Alive',
+        'Expect': '100-continue',
+        'Authorization': f'Bearer {token}',
+        'X-Unity-Version': '2018.4.11f1',
+        'X-GA': 'v1 1',
+        'ReleaseVersion': 'OB49',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }    
     try:
-        print(f"🔍 محاولة جلب معلومات اللاعب: UID={uid} (بحث مع أولوية ME)")
-        
-        # قائمة بجميع السيرفرات المدعومة مع الأولوية لـ ME
-        supported_regions = ["ME", "IND", "BR", "SG", "RU", "ID", "TW", "US", "VN", "TH", "PK", "CIS"]
-        
-        # البحث في كل السيرفرات مع الأولوية لـ ME
-        for region in supported_regions:
-            try:
-                print(f"🔎 البحث في السيرفر: {region}")
-                return_data = asyncio.run(lib2.GetAccountInformation(uid, "7", region, "/GetPlayerPersonalShow"))
-                
-                # إذا وجدنا بيانات صحيحة (ليست خطأ)
-                if return_data and not return_data.get("error"):
-                    print(f"✅ تم العثور على اللاعب في السيرفر: {region}")
-                    formatted_json = json.dumps(return_data, indent=2, ensure_ascii=False)
-                    return formatted_json, 200, {'Content-Type': 'application/json; charset=utf-8'}
-                    
-            except Exception as e:
-                print(f"❌ اللاعب غير موجود في السيرفر {region}: {str(e)}")
-                continue
-        
-        # إذا لم يتم العثور على اللاعب في أي سيرفر
-        response = {
-            "error": "Player not found",
-            "message": f"Player with UID {uid} was not found in any supported region."
-        }
-        return jsonify(response), 404, {'Content-Type': 'application/json; charset=utf-8'}
-        
-    except Exception as e:
-        print(f"❌ خطأ تفصيلي في API:")
-        print(f"   الخطأ: {str(e)}")
-        print(f"   نوع الخطأ: {type(e).__name__}")
-        print(f"   تفاصيل الخطأ:")
-        traceback.print_exc()
-        
-        response = {
-            "error": "Connection failed",
-            "message": f"Unable to connect to Free Fire servers: {str(e)}",
-            "error_type": type(e).__name__
-        }
-        return jsonify(response), 503, {'Content-Type': 'application/json; charset=utf-8'}
-
-# للحفاظ على التوافقية مع الرابط القديم
-@app.route('/api/account')
-@cached_endpoint()
-def get_account_info_old():
-    region = request.args.get('region')
-    uid = request.args.get('uid')
-    
-    if not uid:
-        response = {
-            "error": "Invalid request",
-            "message": "Empty 'uid' parameter. Please provide a valid 'uid'."
-        }
-        return jsonify(response), 400, {'Content-Type': 'application/json; charset=utf-8'}
-
-    if not region:
-        response = {
-            "error": "Invalid request",
-            "message": "Empty 'region' parameter. Please provide a valid 'region'."
-        }
-        return jsonify(response), 400, {'Content-Type': 'application/json; charset=utf-8'}
-
+        data = bytes.fromhex(idd)
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            data=data,
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.content.hex()
+    except requests.exceptions.RequestException as e:
+        print(f"API request to {endpoint} failed: {e}")
+        raise
+@app.route('/accinfo', methods=['GET'])
+def get_player_info():
     try:
-        print(f"🔍 محاولة جلب معلومات اللاعب: UID={uid}, Region={region}")
-        return_data = asyncio.run(lib2.GetAccountInformation(uid, "7", region, "/GetPlayerPersonalShow"))
-        print(f"✅ تم جلب البيانات بنجاح: {return_data}")
-        formatted_json = json.dumps(return_data, indent=2, ensure_ascii=False)
-        return formatted_json, 200, {'Content-Type': 'application/json; charset=utf-8'}
+        uid = request.args.get('uid')
+        region = request.args.get('region', 'default').upper()
+        custom_key = request.args.get('key', key)
+        custom_iv = request.args.get('iv', iv)
+        if not uid:
+            return jsonify({"error": "UID parameter is required"}), 400
+        threading.Thread(target=jwt_token_updater, args=(region,), daemon=True).start()
+        message = uid_generator_pb2.uid_generator()
+        message.saturn_ = int(uid)
+        message.garena = 1
+        protobuf_data = message.SerializeToString()
+        hex_data = binascii.hexlify(protobuf_data).decode()
+        encrypted_hex = encrypt_aes(hex_data, custom_key, custom_iv)
+        api_response = apis(encrypted_hex, region) 
+        if not api_response:
+            return jsonify({"error": "Empty response from API"}), 400
+        message = AccountPersonalShowInfo()
+        message.ParseFromString(bytes.fromhex(api_response)) 
+        result = MessageToDict(message)
+        result['Owners'] = ['TeamxCutehack!!']
+        return jsonify(result)
+    except ValueError:
+        return jsonify({"error": "Invalid UID format"}), 400
     except Exception as e:
-        print(f"❌ خطأ تفصيلي في API:")
-        print(f"   الخطأ: {str(e)}")
-        print(f"   نوع الخطأ: {type(e).__name__}")
-        print(f"   تفاصيل الخطأ:")
-        traceback.print_exc()
-        
-        response = {
-            "error": "Connection failed",
-            "message": f"Unable to connect to Free Fire servers: {str(e)}",
-            "error_type": type(e).__name__
-        }
-        return jsonify(response), 503, {'Content-Type': 'application/json; charset=utf-8'}
-
-@app.route('/')
-def home():
-    return "Free Fire API is running!"
-
-@app.route('/test')
-def test():
-    return "Test endpoint is working!"
-
-if __name__ == '__main__':
-    app.run(port=13984, host='0.0.0.0', debug=True)
+        print(f"Error processing request: {e}")
+        return jsonify({"error": f"Failure to process the data: {str(e)}"}), 500
+@app.route('/favicon.ico')
+def favicon():
+    return '', 404
+if __name__ == "__main__":
+    ensure_jwt_token_sync("default")
+    app.run(host="0.0.0.0", port=5552)
